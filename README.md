@@ -1,4 +1,4 @@
-# fbshot - Save the MiSTer's Linux framebuffer as a PNG.
+# fbshot - Save the MiSTer's Linux framebuffer as a PNG
 
 MiSTer's built-in screenshot (`Win`+`PrtScn`) reads the core's video out of the
 scaler's buffer in DDR. It never looks at `/dev/fb0`, so anything living in the
