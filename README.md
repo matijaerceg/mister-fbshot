@@ -1,4 +1,4 @@
-# fbshot - Save the MiSTer's Linux framebuffer as a PNG
+# mister-fbshot - Save the MiSTer's framebuffer as a PNG
 
 Take a screenshot of the MiSTer's *own* screens — the menu, the wallpaper, and
 apps like MisterZine that draw their own interface. The MiSTer's built-in
