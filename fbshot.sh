@@ -12,7 +12,7 @@
 #   sh fbshot.sh -s 3            enlarge 3x, nearest neighbour
 #   sh fbshot.sh -d 5            wait 5 seconds, then capture
 #
-# Needs nothing but the python3 already on every current MiSTer image.
+# Needs nothing but the python3 already on every recent MiSTer image.
 
 set -e
 
@@ -24,6 +24,7 @@ fi
 
 exec "$PY" - "$@" <<'FBSHOT_PY'
 import os
+import stat
 import struct
 import sys
 import time
@@ -38,16 +39,22 @@ FBIOGET_VSCREENINFO = 0x4600
 FBIOGET_FSCREENINFO = 0x4602
 FBIO_WAITFORVSYNC = 0x40044620
 
+# (bit offset, width) per channel when nothing better is known.
+RGB888 = ((16, 8), (8, 8), (0, 8))
+RGB565 = ((11, 5), (5, 6), (0, 5))
+
 USAGE = """usage: fbshot [-o FILE|-] [-s N] [-d SECONDS] [--dev PATH]
-              [--geom WxHxBPP] [--rgb R,G,B]
+              [--geom WxHxBPP] [--stride BYTES] [--rgb R,G,B]
 
   -o FILE   where to write the PNG; - means stdout
             (default: /media/fat/screenshots/framebuffer/fb-<date>.png)
   -s N      enlarge by N, nearest neighbour (default 1)
   -d SECS   sleep this long before capturing
   --dev     framebuffer device, or a raw dump to convert (default /dev/fb0)
-  --geom    override the geometry, e.g. 320x240x32 (needed with a raw dump)
-  --rgb     override the byte order within a pixel, e.g. 2,1,0 for ARGB
+  --geom    override the geometry, e.g. 320x240x32 (needed with a raw dump;
+            16bpp dumps are assumed to be RGB565)
+  --stride  bytes per row, if it is not width * bytes-per-pixel
+  --rgb     byte order within a 32bpp pixel, e.g. 2,1,0 for XRGB
 """
 
 
@@ -58,7 +65,7 @@ def die(msg):
 
 def parse_args(argv):
     a = {"out": None, "scale": 1, "delay": 0.0, "dev": "/dev/fb0",
-         "geom": None, "rgb": None}
+         "geom": None, "stride": None, "rgb": None}
     i = 0
     while i < len(argv):
         f = argv[i]
@@ -76,6 +83,8 @@ def parse_args(argv):
             a["dev"] = v
         elif f == "--geom" and v is not None:
             a["geom"] = v
+        elif f == "--stride" and v is not None:
+            a["stride"] = int(v)
         elif f == "--rgb" and v is not None:
             a["rgb"] = v
         else:
@@ -91,14 +100,18 @@ def geometry_from_ioctl(fd):
     """fb_var_screeninfo is 160 bytes and fb_fix_screeninfo 68 on arm32."""
     var = struct.unpack("<40I", fcntl.ioctl(fd, FBIOGET_VSCREENINFO, bytes(160)))
     fix = fcntl.ioctl(fd, FBIOGET_FSCREENINFO, bytes(68))
-    stride = struct.unpack_from("<I", fix, 44)[0]
     bpp = var[6]
+    # Channel positions exactly as the kernel reports them: bit offset and
+    # width inside the little-endian pixel word. This is what makes 565,
+    # 1555 and their red/blue-swapped variants come out right rather than
+    # being assumed - MiSTer's fb_cmd can select any of them.
+    bits = ((var[8], var[9]), (var[11], var[12]), (var[14], var[15]))
+    if min(b[1] for b in bits) == 0:  # driver left the bitfields empty
+        bits = RGB888 if bpp == 32 else RGB565
     return {
         "w": var[0], "h": var[1], "xoff": var[4], "yoff": var[5], "bpp": bpp,
-        # red/green/blue bit offsets; the pixel word is little-endian, so
-        # offset 16 means the red byte sits third in memory.
-        "r": var[8] // 8, "g": var[11] // 8, "b": var[14] // 8,
-        "stride": stride or var[2] * (bpp // 8),
+        "bits": bits,
+        "stride": struct.unpack_from("<I", fix, 44)[0] or var[2] * (bpp // 8),
     }
 
 
@@ -111,19 +124,21 @@ def geometry_from_sysfs(dev):
         bpp = int(f.read().strip())
     with open(base + "/stride") as f:
         stride = int(f.read().strip())
-    # sysfs does not report the channel order; assume the MiSTer's ARGB.
+    # sysfs does not report the channel layout; assume the MiSTer's default.
     return {"w": w, "h": h, "xoff": 0, "yoff": 0, "bpp": bpp,
-            "r": 2, "g": 1, "b": 0, "stride": stride or w * (bpp // 8)}
+            "bits": RGB888 if bpp == 32 else RGB565,
+            "stride": stride or w * (bpp // 8)}
 
 
-def geometry(fd, dev, override, rgb):
-    if override:
+def geometry(fd, dev, a):
+    if a["geom"]:
         try:
-            w, h, bpp = [int(n) for n in override.lower().split("x")]
+            w, h, bpp = [int(n) for n in a["geom"].lower().split("x")]
         except ValueError:
             die("--geom wants WxHxBPP, e.g. 320x240x32")
         g = {"w": w, "h": h, "xoff": 0, "yoff": 0, "bpp": bpp,
-             "r": 2, "g": 1, "b": 0, "stride": w * (bpp // 8)}
+             "bits": RGB888 if bpp == 32 else RGB565,
+             "stride": w * (bpp // 8)}
     elif fd is None:
         die("--geom is required when reading a plain file")
     else:
@@ -133,16 +148,24 @@ def geometry(fd, dev, override, rgb):
             g = geometry_from_ioctl(fd)
         except (OSError, struct.error) as e:
             sys.stderr.write("fbshot: ioctl failed (%s); trying sysfs\n" % e)
-            g = geometry_from_sysfs(dev)
-    if rgb:
-        try:
-            g["r"], g["g"], g["b"] = [int(n) for n in rgb.split(",")]
-        except ValueError:
-            die("--rgb wants three byte indices, e.g. 2,1,0")
+            try:
+                g = geometry_from_sysfs(dev)
+            except (OSError, ValueError) as e2:
+                die("cannot read the geometry (%s); pass --geom" % e2)
     if g["bpp"] not in (16, 32):
         die("unsupported depth %d bpp" % g["bpp"])
     if g["w"] < 1 or g["h"] < 1:
         die("framebuffer reports %dx%d - nothing to capture" % (g["w"], g["h"]))
+    if a["stride"]:
+        g["stride"] = a["stride"]
+    if a["rgb"]:
+        if g["bpp"] != 32:
+            die("--rgb applies to 32bpp only; 16bpp uses the reported bitfields")
+        try:
+            r, gr, b = [int(n) for n in a["rgb"].split(",")]
+        except ValueError:
+            die("--rgb wants three byte indices, e.g. 2,1,0")
+        g["bits"] = ((r * 8, 8), (gr * 8, 8), (b * 8, 8))
     return g
 
 
@@ -156,7 +179,8 @@ def read_frame(fd, g):
             break
         buf += chunk
     if len(buf) < want:
-        die("short read: got %d of %d bytes" % (len(buf), want))
+        die("short read: got %d of %d bytes (wrong --geom or --stride?)"
+            % (len(buf), want))
     return bytes(buf)
 
 
@@ -165,19 +189,21 @@ def rows_rgb(buf, g):
     w, h, stride = g["w"], g["h"], g["stride"]
     px = g["bpp"] // 8
     x0 = g["xoff"] * px
+    (ro, rl), (go, gl), (bo, bl) = g["bits"]
     for y in range(h):
         line = buf[y * stride + x0: y * stride + x0 + w * px]
         row = bytearray(w * 3)
         if px == 4:
             # Three C-speed strided copies beat a per-pixel loop by a mile.
-            row[0::3] = line[g["r"]::4]
-            row[1::3] = line[g["g"]::4]
-            row[2::3] = line[g["b"]::4]
-        else:  # RGB565, little-endian
+            row[0::3] = line[ro // 8::4]
+            row[1::3] = line[go // 8::4]
+            row[2::3] = line[bo // 8::4]
+        else:  # 16bpp bitfields: 565, 1555, or either with red and blue swapped
+            rm, gm, bm = (1 << rl) - 1, (1 << gl) - 1, (1 << bl) - 1
             for i, p in enumerate(struct.unpack("<%dH" % w, line)):
-                row[i * 3] = ((p >> 11) & 0x1F) * 255 // 31
-                row[i * 3 + 1] = ((p >> 5) & 0x3F) * 255 // 63
-                row[i * 3 + 2] = (p & 0x1F) * 255 // 31
+                row[i * 3] = ((p >> ro) & rm) * 255 // rm
+                row[i * 3 + 1] = ((p >> go) & gm) * 255 // gm
+                row[i * 3 + 2] = ((p >> bo) & bm) * 255 // bm
         yield row
 
 
@@ -195,21 +221,23 @@ def chunk(tag, data):
 
 
 def write_png(out, w, h, rows):
-    raw = bytearray()
-    for row in rows:
-        raw.append(0)  # filter: none
-        raw += row
     out.write(b"\x89PNG\r\n\x1a\n")
     out.write(chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)))
-    out.write(chunk(b"IDAT", zlib.compress(bytes(raw), 6)))
+    # Compress row by row: a 1080p image never exists uncompressed in one
+    # piece, which matters on a board with 512MB and a core running in it.
+    co = zlib.compressobj(6)
+    parts = []
+    for row in rows:
+        parts.append(co.compress(b"\0" + bytes(row)))  # filter: none
+    parts.append(co.flush())
+    out.write(chunk(b"IDAT", b"".join(parts)))
     out.write(chunk(b"IEND", b""))
 
 
 def default_path():
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    shots = "/media/fat/screenshots/framebuffer"
     if os.path.isdir("/media/fat"):
-        return "%s/fb-%s.png" % (shots, stamp)
+        return "/media/fat/screenshots/framebuffer/fb-%s.png" % stamp
     return "fb-%s.png" % stamp
 
 
@@ -222,8 +250,10 @@ def main(argv):
         die("%s does not exist - is this a MiSTer?" % a["dev"])
     fd = os.open(a["dev"], os.O_RDONLY)
     try:
-        is_fb = os.path.basename(a["dev"]).startswith("fb")
-        g = geometry(fd if is_fb else None, a["dev"], a["geom"], a["rgb"])
+        # A character device is a framebuffer to ask; anything else is a dump
+        # to convert. Going by the name would make fb.raw the wrong thing.
+        is_fb = stat.S_ISCHR(os.fstat(fd).st_mode)
+        g = geometry(fd if is_fb else None, a["dev"], a)
         if is_fb and fcntl is not None:
             try:  # land between frames when the driver offers it
                 fcntl.ioctl(fd, FBIO_WAITFORVSYNC, struct.pack("I", 0))
