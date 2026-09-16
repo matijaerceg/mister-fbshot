@@ -13,23 +13,23 @@ image ships with is the only dependency.
 
 ## One command
 
-From your PC, with the PNG landing next to you:
+From your PC, with the PNG landing next to you. Replace `192.168.1.100` with
+your own MiSTer's IP address — the OSD shows it under System Information, and
+your router's client list will have it as `MiSTer`:
 
 ```sh
 curl -sL https://raw.githubusercontent.com/matijaerceg/mister-fbshot/main/fbshot.sh | ssh root@192.168.1.100 "sh -s -- -o -" > fbshot.png
 ```
 
 Your PC fetches the script, ssh hands it to the MiSTer's shell, the PNG comes
-back down the same connection. Nothing touches the SD card.
+back down the same connection. Nothing touches the SD card. The default
+password is `1`.
 
 Or on the MiSTer itself, saving to `/media/fat/screenshots/framebuffer/`:
 
 ```sh
 wget -qO- https://raw.githubusercontent.com/matijaerceg/mister-fbshot/main/fbshot.sh | sh
 ```
-
-Use your MiSTer's IP (the main menu shows it, bottom right); `root@MiSTer.local`
-works on some networks. The default password is `1`.
 
 `wget` rather than `curl` on the MiSTer because a stock image has no CA bundle
 where curl looks for one, so HTTPS fails with "unable to get local issuer
