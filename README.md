@@ -8,25 +8,33 @@ framebuffer layer — the MiSTer menu wallpaper, MisterZine, other framebuffer
 apps — can't be captured with it. fbshot grabs that layer instead.
 
 One POSIX shell script with a Python 3 program inside it. Nothing to install,
-nothing to build: every current MiSTer image already has the `python3` and
-`curl` it needs.
+nothing to build, nothing to leave behind: the `python3` every current MiSTer
+image ships with is the only dependency.
 
 ## One command
 
 From your PC, with the PNG landing next to you:
 
 ```sh
-ssh root@192.168.1.100 "curl -sL https://raw.githubusercontent.com/matijaerceg/mister-fbshot/main/fbshot.sh | sh -s -- -o -" > fbshot.png
+curl -sL https://raw.githubusercontent.com/matijaerceg/mister-fbshot/main/fbshot.sh | ssh root@192.168.1.100 "sh -s -- -o -" > fbshot.png
 ```
+
+Your PC fetches the script, ssh hands it to the MiSTer's shell, the PNG comes
+back down the same connection. Nothing touches the SD card.
 
 Or on the MiSTer itself, saving to `/media/fat/screenshots/framebuffer/`:
 
 ```sh
-curl -sL https://raw.githubusercontent.com/matijaerceg/mister-fbshot/main/fbshot.sh | sh
+wget -qO- https://raw.githubusercontent.com/matijaerceg/mister-fbshot/main/fbshot.sh | sh
 ```
 
 Use your MiSTer's IP (the main menu shows it, bottom right); `root@MiSTer.local`
 works on some networks. The default password is `1`.
+
+`wget` rather than `curl` on the MiSTer because a stock image has no CA bundle
+where curl looks for one, so HTTPS fails with "unable to get local issuer
+certificate". If you'd rather use curl there, point it at the bundle the
+updater leaves behind: `curl -sL --cacert /etc/ssl/certs/cacert.pem ...`.
 
 ## Options
 
@@ -41,7 +49,7 @@ sh fbshot.sh -d 5            wait 5 seconds, then capture
 ## Keeping it on the SD card
 
 ```sh
-curl -sL https://raw.githubusercontent.com/matijaerceg/mister-fbshot/main/fbshot.sh -o /media/fat/Scripts/fbshot.sh
+wget -O /media/fat/Scripts/fbshot.sh https://raw.githubusercontent.com/matijaerceg/mister-fbshot/main/fbshot.sh
 ```
 
 It then shows up in the MiSTer's Scripts menu — but note that running a script
